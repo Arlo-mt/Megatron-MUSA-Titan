@@ -1,5 +1,5 @@
 # Copyright 2023-2024 SGLang Team
-# Licensed under Apache-2.0; see LICENSE.sglang.
+# Licensed under Apache-2.0: https://www.apache.org/licenses/LICENSE-2.0
 # Modified by dinglei: add first-order autograd with the saved forward cache.
 """Paired, out-of-place Neox RoPE with first-order MUSA autograd."""
 

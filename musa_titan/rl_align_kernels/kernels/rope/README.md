@@ -6,7 +6,7 @@ the operator implementation:
 
 ```text
 musa_titan/rl_align_kernels/
-├── kernels/rope/          # Operator, autograd and license
+├── kernels/rope/          # Operator and autograd
 ├── tests/ops/rope/        # Correctness and invariance tests
 └── benchmarks/rope/      # Standalone forward measurements
 ```
@@ -28,7 +28,7 @@ Callers must supply positions within the cache bounds.
 The forward retains the supplied paired Neox kernel: FP32 multiplication and
 addition, no FMA, and one cast on output. `T <= 32` uses block 128; larger
 batches use block 1024. Both use four warps and one stage by default.
-The source license is retained in `LICENSE.sglang`.
+The source is licensed under [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0).
 
 ## Megatron integration
 
