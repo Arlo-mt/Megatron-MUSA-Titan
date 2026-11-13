@@ -35,6 +35,7 @@ rl_align_kernels/
 ├── tests/
 │   └── ops/
 │       └── rmsnorm/
+│           ├── README.md
 │           ├── conftest.py
 │           ├── test_rmsnorm.py
 │           └── test_fused_add_rmsnorm.py
@@ -45,7 +46,7 @@ rl_align_kernels/
 ```
 
 `kernels/rmsnorm/` contains the implementations.
-[Tests](../../tests/ops/rmsnorm/) cover FP32/BF16 forward accuracy, byte
+[Tests](../../tests/ops/rmsnorm/README.md) cover FP32/BF16 forward accuracy, byte
 invariance and interface contracts, including fused autograd support.
 [Benchmarks](../../benchmarks/rmsnorm/README.md) contain the operator timing script
 and recorded measurements.
