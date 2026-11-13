@@ -1,36 +1,41 @@
-# RMSNorm 精度测试
+# RMSNorm correctness tests
 
-使用 pytest 验证本仓库两个 Triton RMSNorm 的前向接口及 fused autograd 支持。
+Use pytest to validate both Triton RMSNorm forward interfaces and fused autograd support.
 
-## 范围与组织
+## Scope and organization
 
-- 使用 pytest，只在 MUSA 上执行被测 Triton 算子。
-- 仅覆盖 `torch.float32` 和 `torch.bfloat16`，输入、权重和残差使用相同 dtype。
-- 覆盖普通 RMSNorm 和 fused add + RMSNorm 的前向精度、重复执行确定性、batch 不变性及接口约定。
-- fused autograd 用例检查输入、残差和权重的一阶梯度可计算、有限且非零。
-- 不包含 benchmark、性能门槛、独立的梯度数值正确性比较或端到端训练验收。
+- Run the Triton operators only on MUSA through pytest.
+- Cover `torch.float32` and `torch.bfloat16`, with matching input, weight and residual dtypes.
+- Check ordinary RMSNorm and fused add + RMSNorm forward accuracy, repeatability,
+  batch invariance and interface contracts.
+- Check that fused first-order gradients for input, residual and weight can be
+  computed and are finite and nonzero.
+- Exclude benchmarks, performance thresholds, independent gradient accuracy
+  comparisons and end-to-end training acceptance.
 
-本目录包含以下测试文件：
+This directory contains:
 
 ```text
 musa_titan/rl_align_kernels/tests/ops/rmsnorm/
 ├── README.md
-├── conftest.py                  # MUSA fixture、固定种子、参考计算和比较函数
-├── test_rmsnorm.py              # 两个算子共用的精度、不变性和权重接口用例
-└── test_fused_add_rmsnorm.py     # fused 残差语义、舍入、异常及 autograd 检查
+├── conftest.py                  # MUSA fixtures, seeds, references and comparisons
+├── test_rmsnorm.py              # Shared accuracy, invariance and weight checks
+└── test_fused_add_rmsnorm.py     # Residual semantics, rounding, errors and autograd
 ```
 
-测试直接导入仓库 `musa_titan/rl_align_kernels/kernels/rmsnorm/` 中的实现，并核对实际导入路径。
+Tests import the implementations from
+`musa_titan/rl_align_kernels/kernels/rmsnorm/` and verify their actual import locations.
 
-## 测试方法
+## Test methods
 
-### 独立参考值
+### Independent references
 
-使用固定种子在 CPU 生成数据，先转换到被测 dtype，再将同一份数据传到 MUSA。
-CPU 只负责生成数据和计算参考值，不作为被测算子的执行后端。
-参考计算不调用被测 kernel，也不复制其 Triton reduction tree。
+Generate data on CPU with fixed seeds, convert it to the tested dtype, then send
+that same data to MUSA. CPU is used only to generate inputs and compute reference
+values; it is not a fallback backend for the operator under test. Reference
+computations neither call the tested kernel nor copy its Triton reduction tree.
 
-普通 RMSNorm 使用独立 PyTorch FP32 公式：
+Ordinary RMSNorm uses an independent PyTorch FP32 formula:
 
 ```text
 x32 = FP32(x)
@@ -39,11 +44,12 @@ rstd_ref = 1 / sqrt(mean(x32 * x32, dim=-1) + eps)
 y_ref = x32 * rstd_ref[..., None] * w32
 ```
 
-用 CPU `torch.nn.functional.rms_norm` 交叉检查公式。参考值必须基于已经转换到
-被测 dtype 的输入，避免将输入量化误差算入 kernel 误差。MUSA 输出转 CPU FP32
-后与 FP32 参考值比较，比较包含最终输出转换带来的舍入误差。
+Cross-check this formula with CPU `torch.nn.functional.rms_norm`. Reference values
+must use inputs already converted to the tested dtype, so input quantization is
+not counted as kernel error. Convert MUSA outputs to CPU FP32 for comparison;
+this includes rounding from the final output conversion.
 
-fused add + RMSNorm 使用以下计算约定：
+Fused add + RMSNorm uses:
 
 ```text
 s32 = FP32(x) + FP32(residual)
@@ -52,99 +58,119 @@ y_ref = s32 * rstd_ref[..., None] * FP32(weight)
 residual_ref = cast(s32, input.dtype)
 ```
 
-归一化使用尚未转换回输入 dtype 的 `s32`。不能以 BF16 的
-`rms_norm(x + residual)` 作为 fused 参考值，因为该写法会提前舍入残差和。
+Normalization uses `s32` before conversion back to the input dtype. BF16
+`rms_norm(x + residual)` is not a valid fused reference because it rounds the
+residual sum before normalization.
 
-### 数值精度
+### Numerical accuracy
 
-使用 `torch.testing.assert_close`，固定门槛如下。
+Use `torch.testing.assert_close` with these fixed tolerances:
 
-| 被测结果 | atol | rtol |
+| Result | atol | rtol |
 | --- | ---: | ---: |
-| FP32 归一化输出 | 2e-5 | 2e-5 |
-| BF16 归一化输出，转 FP32 后比较 | 2e-2 | 2e-2 |
-| fused 输出的 FP32 `rstd`，两种输入 dtype 均适用 | 2e-5 | 2e-5 |
+| FP32 normalized output | 2e-5 | 2e-5 |
+| BF16 normalized output, converted to FP32 for comparison | 2e-2 | 2e-2 |
+| Fused FP32 `rstd`, for both input dtypes | 2e-5 | 2e-5 |
 
-所有有限输入样例都检查输出有限性。失败时先定位计算差异，不自动放宽门槛。
-不同实现的 reduction 顺序可能不同，因此独立参考精度通过不等于逐位一致。
+All finite-input cases check that outputs are finite. Investigate numerical
+mismatches before changing tolerances. Different reduction orders can satisfy an
+independent accuracy reference without producing identical bytes.
 
-### 逐位一致性
+### Byte equality
 
-先检查 shape 和 dtype，再将张量复制到 CPU、转为连续存储并展平，按原始字节比较。
-不只使用 `max_abs_diff == 0` 或浮点数值相等，避免遗漏正负零等位模式差异。
+First check shape and dtype. Copy tensors to CPU, make them contiguous, flatten
+them and compare their original bytes. Floating-point equality or
+`max_abs_diff == 0` alone can miss bit-pattern differences such as signed zero.
 
-- 重复执行：同一输入执行 10 次，全部与第一次结果逐位一致。
-- batch 不变性：固定目标行和权重，改变 batch 大小、目标行位置及相邻行数据。
-- 行布局不变性：插入无关 padding 行、打乱行顺序后恢复，以及完整 batch 与分片执行。
-- 张量布局不变性：同一逻辑输入以不同前导维度、连续和非连续布局执行，恢复相同 shape 后比较。
+- Repeatability: run the same input 10 times and compare every result with the first.
+- Batch invariance: hold the target row and weight fixed while changing batch
+  size, target-row position and neighboring rows.
+- Row layout: insert unrelated padding rows, permute and restore row order, and
+  compare a complete batch with independently processed chunks.
+- Tensor layout: use different leading dimensions and contiguous or strided
+  storage, then restore the same logical shape for comparison.
 
-普通 RMSNorm 检查归一化输出；fused 检查四个输出，包括 FP32 `rstd` 和
-`residual_sum_fp32`。同一后端内的不变性检查全部要求零字节差异。
+Ordinary RMSNorm checks its normalized output. Fused RMSNorm checks all four
+outputs, including FP32 `rstd` and `residual_sum_fp32`. Every invariance check
+within a backend requires zero differing bytes.
 
-### Fused 四输出与接口约定
+### Fused outputs and interface contracts
 
-| 输出 | shape / dtype | 检查方法 |
+| Output | Shape / dtype | Check |
 | --- | --- | --- |
-| `normalized` | 与输入相同 | 与 `y_ref` 按输入 dtype 对应容差比较 |
-| `residual_sum` | 与输入相同 | 与 `residual_ref` 逐位比较 |
-| `rstd` | `input.shape[:-1]` / FP32 | 与 `rstd_ref` 按 FP32 容差比较 |
-| `residual_sum_fp32` | 与输入相同 / FP32 | 与 `s32` 逐位比较 |
+| `normalized` | Same as input | Compare with `y_ref` using the input-dtype tolerance |
+| `residual_sum` | Same as input | Compare bytes with `residual_ref` |
+| `rstd` | `input.shape[:-1]` / FP32 | Compare with `rstd_ref` using the FP32 tolerance |
+| `residual_sum_fp32` | Same as input / FP32 | Compare bytes with `s32` |
 
-另行检查输出 device、输入和权重未被修改，以及 fused 四个非空输出使用独立存储。
-一维输入对应的 `rstd` 应为标量。
+Also check output devices, unchanged inputs and weights, and independent storage
+for the four nonempty fused outputs. A one-dimensional input must produce scalar
+`rstd`.
 
-异常检查对齐 Titan 接口：普通 RMSNorm 的权重维度错误，以及 fused 的 shape、dtype、eps
-错误均触发 `ValueError`。
+Exception checks follow Titan's interfaces: invalid ordinary RMSNorm weight
+shapes and invalid fused shapes, dtypes or epsilon values raise `ValueError`.
 
-fused 支持一阶 autograd：分别让输入、残差或权重需要梯度，以归一化输出和残差输出的和
-构造 loss，检查对应梯度的 shape、dtype、有限性及非零性，并确认 FP32 `rstd` 和
-`residual_sum_fp32` 不参与求导。该用例验证 backward 接入，不提供独立的梯度数值精度
-或 backward batch 不变性验收。
+Fused RMSNorm supports first-order autograd. Enable gradients separately for
+input, residual and weight, and construct a loss from the sums of the normalized
+and residual outputs. Check the resulting gradient's shape, dtype, finiteness and
+nonzero magnitude. Confirm that FP32 `rstd` and `residual_sum_fp32` do not require
+gradients. This verifies backward integration, not independent gradient accuracy
+or backward batch invariance.
 
-## 测试矩阵
+## Test matrix
 
-两种算子均覆盖 FP32、BF16。除专门的 epsilon 测试外，默认 `eps=1e-6`。
-按下表分组参数化，组与组之间不做笛卡尔积。
+Both operators cover FP32 and BF16. Use `eps=1e-6` except in the dedicated epsilon
+cases. Parameterize each group separately; do not take a Cartesian product across
+groups.
 
-| 测试组 | 参数和数据 | 判定 |
+| Test group | Parameters and data | Acceptance |
 | --- | --- | --- |
-| 常规精度 | `H={128,1024,2048,4096}` × 行数 `{1,7,64,257}` × 两种 dtype；随机非单位权重；seed=0 | 独立参考容差、有限性、shape/dtype/device |
-| 分块边界 | `H={1023,1025,2047,2049}` × 行数 `{1,7}` × 两种 dtype；seed=1 | 尾部 mask 与跨 1024 列分块精度 |
-| 重复执行 | `H=2048`，行数 64，两种 dtype；seed=2；重复 10 次 | 原始字节一致 |
-| batch 与行布局 | `H={128,2048}`，batch 行数 `{1,7,64,257}`，目标行位于首部、中间、末尾；两种 dtype；目标行 seed=3，邻居 seed=30/31，padding seed=33 | 单行、padding、排列恢复、分片结果逐位一致 |
-| 张量布局 | `H=2048`；一维 `[H]` 与 `[1,H]`；同一组 6 行分别为 `[6,H]`、`[2,3,H]`；额外构造非连续输入、残差和权重；两种 dtype；seed=4 | 恢复相同逻辑布局后逐位一致 |
-| 数值边界 | `H=2048`，7 行；全零、幅度约 `1e-4` 的小值、正负混合、幅度 `1e-4` 至 `1e4` 的有限值；两种 dtype；seed=5 | 精度与有限性 |
-| epsilon | `H=2048`，7 行；小值输入；`eps={1e-6,1e-5}`；两种 dtype；seed=6 | 对照参考确认 epsilon 在平方根内；零输入不作为唯一证据 |
-| 权重语义 | `H=2048`，7 行；随机、全零、全一、全二权重；两种 dtype；seed=7 | 正确应用 `weight`，排除 `1+weight` 语义 |
-| fused 残差语义 | `H=2048`，7 行；残差为零、精确抵消、近似抵消；另加 BF16 加法舍入边界样例；seed=8 | 四输出正确；参考数据能区分提前舍入和 FP32 和参与归一化 |
-| 接口边界 | 权重 shape 错误；fused 残差 shape、输入间 dtype 不一致、空 hidden、非法 eps；两种 dtype；seed=9 | 符合当前接口的 `ValueError` 异常类型 |
-| fused autograd | `H=2048`，7 行；分别使输入、残差、权重 `requires_grad=True`；两种 dtype；seed=9，共 6 例 | 一阶梯度 shape/dtype 正确、有限且非零；FP32 缓存不参与求导 |
+| Regular accuracy | `H={128,1024,2048,4096}` x rows `{1,7,64,257}` x both dtypes; random non-unit weights; seed=0 | Independent reference tolerances, finiteness, shape/dtype/device |
+| Chunk boundaries | `H={1023,1025,2047,2049}` x rows `{1,7}` x both dtypes; seed=1 | Tail masking and accuracy across 1024-column boundaries |
+| Repeatability | `H=2048`, 64 rows, both dtypes; seed=2; 10 repetitions | Original bytes match |
+| Batch and row layout | `H={128,2048}`, batch rows `{1,7,64,257}`; target at the first, middle and last positions; both dtypes; target seed=3, neighbor seeds=30/31, padding seed=33 | Single-row, padded, restored-permutation and chunked results match byte for byte |
+| Tensor layout | `H=2048`; one-dimensional `[H]` versus `[1,H]`; the same 6 rows as `[6,H]` and `[2,3,H]`; additional strided inputs, residuals and weights; both dtypes; seed=4 | Bytes match after restoring the same logical layout |
+| Numerical boundaries | `H=2048`, 7 rows; zeros, small values around `1e-4`, mixed signs and finite magnitudes from `1e-4` to `1e4`; both dtypes; seed=5 | Accuracy and finiteness |
+| Epsilon | `H=2048`, 7 rows; small inputs; `eps={1e-6,1e-5}`; both dtypes; seed=6 | Reference confirms epsilon is inside the square root; zero inputs are not the only evidence |
+| Weight semantics | `H=2048`, 7 rows; random, all-zero, all-one and all-two weights; both dtypes; seed=7 | Apply `weight` correctly, without `1+weight` semantics |
+| Fused residual semantics | `H=2048`, 7 rows; zero residual, exact cancellation and near cancellation; additional BF16 addition-rounding boundary case; seed=8 | All four outputs are correct; reference data distinguishes premature rounding from normalization of the FP32 sum |
+| Interface boundaries | Invalid weight shape; fused residual shape, mismatched dtypes, empty hidden dimension and invalid epsilon; both dtypes; seed=9 | Expected `ValueError` exceptions |
+| Fused autograd | `H=2048`, 7 rows; set `requires_grad=True` separately for input, residual and weight; both dtypes; seed=9; 6 cases | First-order gradients have correct shape/dtype and are finite and nonzero; FP32 caches do not require gradients |
 
-BF16 舍入边界样例需先在参考计算中确认“提前舍入”会改变预期结果，再用于测试。
-随机非单位权重为主要精度数据，全一权重仅用于特定语义检查。
+Before using the BF16 rounding-boundary case, confirm in the reference computation
+that premature rounding changes the expected result. Random non-unit weights are
+the primary accuracy inputs; all-one weights are used only for specific semantic
+checks.
 
-## 运行与验收
+## Running and acceptance
 
-在已安装 `pytest`、`torch`、`torch_musa` 和适配版本 Triton 的云端
-MUSA 环境，从仓库根目录运行：
+From the repository root, use a MUSA environment with `pytest`, `torch`,
+`torch_musa` and a compatible Triton version installed:
 
 ```bash
 python -m pytest musa_titan/rl_align_kernels/tests/ops/rmsnorm -v -ra
 ```
 
-测试注册 `torch_musa` 并检查设备可用性；缺少依赖或 MUSA 设备时明确失败，
-不回退 CPU，也不以全部 skip 作为验收通过。执行前检查 GPU 占用，不终止其他任务。
+Tests register `torch_musa` and require an available MUSA device. Missing
+dependencies or devices cause explicit failures; there is no CPU fallback or
+acceptance based on skipped tests. Check GPU availability before running and do
+not terminate unrelated workloads.
 
-失败信息包含算子、shape、dtype、eps、seed、最大绝对误差、超差元素数及首个差异位置；
-逐位检查额外报告字节不匹配数。pytest 报告头记录 kernel 源码路径及 SHA256、
-PyTorch/torch_musa/Triton 版本和设备型号。运行时另行保留 Git 版本与日志。
-结尾按 `accuracy`、`invariance`、`contract` 分别汇总通过、失败、错误和跳过数量。
+Failure diagnostics include the operator, shape, dtype, epsilon, seed, maximum
+absolute difference, number of elements outside tolerance and first mismatch
+location. Byte comparisons also report the number of differing bytes. The pytest
+header records kernel source locations and SHA256 hashes, PyTorch/torch_musa/Triton
+versions and device information. Retain the Git revision and execution log for
+each run. The terminal summary reports passed, failed, errored and skipped cases
+separately for `accuracy`, `invariance` and `contract`.
 
-## 参考来源
+## References
 
-参考 RL-Kernel 提交 `49941801f942428fd52ac5b66a1b0c070418724e`：
+Reference RL-Kernel commit `49941801f942428fd52ac5b66a1b0c070418724e`:
 
-- [RMSNorm 测试](https://github.com/RL-Align/RL-Kernel/blob/49941801f942428fd52ac5b66a1b0c070418724e/tests/ops/norm/test_rms_norm.py)
-- [PyTorch 参考实现](https://github.com/RL-Align/RL-Kernel/blob/49941801f942428fd52ac5b66a1b0c070418724e/rl_engine/reference/norm/rms_norm.py)
+- [RMSNorm tests](https://github.com/RL-Align/RL-Kernel/blob/49941801f942428fd52ac5b66a1b0c070418724e/tests/ops/norm/test_rms_norm.py)
+- [PyTorch reference implementation](https://github.com/RL-Align/RL-Kernel/blob/49941801f942428fd52ac5b66a1b0c070418724e/rl_engine/reference/norm/rms_norm.py)
 
-借鉴精度与不变性分开判定的方法及 dtype 容差；本方案限定 MUSA、FP32/BF16，另按 Titan 接口补充 fused autograd 支持检查。
+The suite follows the separation of accuracy and invariance checks and the dtype
+specific tolerances. Its scope is MUSA FP32/BF16, with an additional fused autograd
+support check matching Titan's interface.

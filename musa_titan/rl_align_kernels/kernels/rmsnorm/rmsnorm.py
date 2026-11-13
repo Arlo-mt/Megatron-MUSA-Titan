@@ -38,11 +38,11 @@ def _rms_norm_kernel(
     weight_ptr,         # [H]
     output_ptr,         # [T, H]
     rstd_ptr,           # [T], only allocated for autograd
-    input_row_stride,   # H 每行元素数
+    input_row_stride,   # Row stride in elements
     output_row_stride,  # H
     n_cols,             # H
     eps,                # 1e-6
-    BLOCK_SIZE: tl.constexpr,   # 每个 program 处理的元素数量，program 内线程数量固定
+    BLOCK_SIZE: tl.constexpr,   # Columns per chunk; threads per program stay fixed
     SAVE_RSTD: tl.constexpr,
 ):
     """
@@ -50,21 +50,21 @@ def _rms_norm_kernel(
     RMS Norm: y = x / sqrt(mean(x^2) + eps) * weight
     Each block handles one row of the input tensor.
     """
-    # 0, 1, 2, ..., T - 1, 一行一个由一个 triton program 处理
+    # One Triton program per row, indexed from 0 to T - 1.
     row_idx = tl.program_id(0).to(tl.int64)
-    # 当前行起始地址 = 首地址 + 行号 * 行 stride
+    # Row start = base address + row index * row stride.
     row_start_ptr = input_ptr + row_idx * input_row_stride
-    # 输出行起始地址
+    # Start address of the output row.
     output_row_start_ptr = output_ptr + row_idx * output_row_stride
 
     # Step 1: Compute sum of squares in float32 to avoid overflow
-    sum_sq = tl.zeros([1], dtype=tl.float32) # FP32 累加器
-    for col_offset in range(0, n_cols, BLOCK_SIZE): # 按 BLOCK_SIZE 分块处理列
+    sum_sq = tl.zeros([1], dtype=tl.float32) # FP32 accumulator
+    for col_offset in range(0, n_cols, BLOCK_SIZE): # Process columns in BLOCK_SIZE chunks
         col_idx = col_offset + tl.arange(0, BLOCK_SIZE) # 0, 1, 2, ..., 1023
         mask = col_idx < n_cols
 
-        # 加载当前行当前块输入值
-        vals = tl.load(row_start_ptr + col_idx, mask=mask, other=0.0) # 越界位置为 0
+        # Load the current chunk from this row.
+        vals = tl.load(row_start_ptr + col_idx, mask=mask, other=0.0) # Zero out-of-bounds values
         # Convert to float32 for accumulation to prevent overflow
         vals_f32 = vals.to(tl.float32)
         sq_vals = vals_f32 * vals_f32

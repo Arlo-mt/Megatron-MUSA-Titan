@@ -22,7 +22,7 @@ def _fused_add_rmsnorm_kernel(
     residual_sum_fp32_ptr,
     n_cols: tl.constexpr,
     eps: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,   # 1024，每个program处理一行，列分块包含 1024 个元素
+    BLOCK_SIZE: tl.constexpr,   # One program per row, with 1024 columns per chunk
 ):
     # Same 1024-column chunking as rmsnorm_batch_invariant.py. Neither the
     # reduction tree nor the launch configuration depends on the batch size.
