@@ -76,6 +76,11 @@ def apply_patch():
         pass
 
     megatron.training.initialize._compile_dependencies = _compile_dependencies
+    # hack(dinglei)
+    # Install paired RoPE for both pretraining and RL before attention is built.
+    from .rope import apply_patch as apply_rope_patch
+    apply_rope_patch()
+    #
     _patch_applied = True
 
 

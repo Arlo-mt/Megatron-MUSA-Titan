@@ -137,6 +137,11 @@ bash run_deepseekv3.sh
 
 Recipes are starting points for cluster-specific configuration, not one-command reproductions of the reported 10,000-GPU benchmark. See [RL examples](examples/rl) for the current RL recipe structure.
 
+[Paired Q/K RoPE](musa_titan/rl_align_kernels/kernels/rope/README.md) is installed
+by both training patch entry points for supported MUSA attention paths. It fuses
+the two rotations, supports first-order backward, and preserves Megatron's
+frequency-cache generation.
+
 ## Contributing
 
 Welcome any form of contribution of code, model implementation and document!
